@@ -5209,6 +5209,54 @@ TEST(crs, boundCRS_projectedCRS_to_PROJ_string) {
 
 // ---------------------------------------------------------------------------
 
+TEST(crs, boundCRS_nadcon_to_PROJ_string_usePROJAlternativeGridNames_false) {
+
+    auto dbContext = DatabaseContext::create();
+    auto factoryEPSG = AuthorityFactory::create(dbContext, "EPSG");
+
+    // NAD27 to WGS 84 (79)
+    auto op = factoryEPSG->createCoordinateOperation(
+        "15851", /* usePROJAlternativeGridNames = */ false);
+    auto transf = nn_dynamic_pointer_cast<Transformation>(op);
+
+    auto crs = BoundCRS::create(GeographicCRS::EPSG_4267, // NAD27
+                                GeographicCRS::EPSG_4326, // WGS84
+                                NN_CHECK_THROW(transf));
+
+    EXPECT_EQ(crs->exportToPROJString(
+                  PROJStringFormatter::create(
+                      PROJStringFormatter::Convention::PROJ_4, dbContext)
+                      .get()),
+              "+proj=longlat +ellps=clrk66 +nadgrids=us_noaa_conus.tif "
+              "+no_defs +type=crs");
+}
+
+// ---------------------------------------------------------------------------
+
+TEST(crs, boundCRS_nadcon_to_PROJ_string_usePROJAlternativeGridNames_true) {
+
+    auto dbContext = DatabaseContext::create();
+    auto factoryEPSG = AuthorityFactory::create(dbContext, "EPSG");
+
+    // NAD27 to WGS 84 (79)
+    auto op = factoryEPSG->createCoordinateOperation(
+        "15851", /* usePROJAlternativeGridNames = */ true);
+    auto transf = nn_dynamic_pointer_cast<Transformation>(op);
+
+    auto crs = BoundCRS::create(GeographicCRS::EPSG_4267, // NAD27
+                                GeographicCRS::EPSG_4326, // WGS84
+                                NN_CHECK_THROW(transf));
+
+    EXPECT_EQ(
+        crs->exportToPROJString(
+            PROJStringFormatter::create(PROJStringFormatter::Convention::PROJ_4)
+                .get()),
+        "+proj=longlat +ellps=clrk66 +nadgrids=us_noaa_conus.tif +no_defs "
+        "+type=crs");
+}
+
+// ---------------------------------------------------------------------------
+
 TEST(crs, boundCRS_identify_db) {
     auto dbContext = DatabaseContext::create();
     auto factoryEPSG = AuthorityFactory::create(dbContext, "EPSG");
@@ -5855,7 +5903,8 @@ TEST(crs, derivedProjectedCRS_WKT2_2019) {
         "                ID[\"EPSG\",8806]],\n"
         "            PARAMETER[\"False northing\",0,\n"
         "                LENGTHUNIT[\"metre\",1],\n"
-        "                ID[\"EPSG\",8807]]]],\n"
+        "                ID[\"EPSG\",8807]]],\n"
+        "        ID[\"EPSG\",32631]],\n"
         "    DERIVINGCONVERSION[\"unnamed\",\n"
         "        METHOD[\"PROJ unimplemented\"]],\n"
         "    CS[Cartesian,2],\n"

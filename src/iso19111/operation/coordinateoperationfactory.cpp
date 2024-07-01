@@ -38,6 +38,7 @@
 #include "proj/metadata.hpp"
 #include "proj/util.hpp"
 
+#include "proj/internal/datum_internal.hpp"
 #include "proj/internal/internal.hpp"
 #include "proj/internal/io_internal.hpp"
 #include "proj/internal/tracing.hpp"
@@ -564,6 +565,14 @@ struct CoordinateOperationFactory::Private {
                  std::list<std::pair<std::string, std::string>>>
             cacheNameToCRS{};
 
+        // Normally there should be at most one element in this stack
+        // This is set when computing a CompoundCRS to GeogCRS operation to
+        // relate the VerticalCRS of the CompoundCRS to the geographicCRS of
+        // the horizontal component of the CompoundCRS. This is especially
+        // used if the VerticalCRS is a DerivedVerticalCRS using a
+        // (non-standard) "Ellipsoid" vertical datum
+        std::vector<crs::GeographicCRSNNPtr> geogCRSOfVertCRSStack{};
+
         Context(const metadata::ExtentPtr &extent1In,
                 const metadata::ExtentPtr &extent2In,
                 const CoordinateOperationContextNNPtr &contextIn)
@@ -698,7 +707,7 @@ struct CoordinateOperationFactory::Private {
         const crs::GeographicCRS *geogDst,
         std::vector<CoordinateOperationNNPtr> &res);
 
-    static void createOperationsVertToGeogBallpark(
+    static void createOperationsVertToGeogSynthetized(
         const crs::CRSNNPtr &sourceCRS, const crs::CRSNNPtr &targetCRS,
         Private::Context &context, const crs::VerticalCRS *vertSrc,
         const crs::GeographicCRS *geogDst,
@@ -2583,10 +2592,14 @@ static CoordinateOperationNNPtr createHorizVerticalPROJBased(
         if (!remarks.empty()) {
             properties.set(common::IdentifiedObject::REMARKS_KEY, remarks);
         }
-        return createPROJBased(
-            properties, exportable, sourceCRS, targetCRS, nullptr,
-            verticalTransform->coordinateOperationAccuracies(),
-            verticalTransform->hasBallparkTransformation());
+        auto accuracies = verticalTransform->coordinateOperationAccuracies();
+        if (accuracies.empty() &&
+            dynamic_cast<const Conversion *>(verticalTransform.get())) {
+            accuracies.emplace_back(metadata::PositionalAccuracy::create("0"));
+        }
+        return createPROJBased(properties, exportable, sourceCRS, targetCRS,
+                               nullptr, accuracies,
+                               verticalTransform->hasBallparkTransformation());
     } else {
         bool emptyIntersection = false;
         auto ops = std::vector<CoordinateOperationNNPtr>{horizTransform,
@@ -3276,7 +3289,7 @@ void CoordinateOperationFactory::Private::createOperationsWithDatumPivot(
     // ... but when transforming between 2 IGNF CRS, we do just one single pass
     // by allowing directly all transformation. There is no strong reason for
     // that particular case, except that otherwise we'd get different results
-    // for thest test/cli/testIGNF script when transforming a point outside
+    // for test/cli/test_cs2cs_ignf.yaml when transforming a point outside
     // the area of validity... Not totally sure the behaviour we try to preserve
     // here with the particular case is fundamentally better than the general
     // case. The general case is needed typically for the RGNC91-93 -> RGNC15
@@ -3734,8 +3747,8 @@ bool CoordinateOperationFactory::Private::createOperationsFromDatabase(
         res = applyInverse(createOperationsGeogToVertFromGeoid(
             targetCRS, sourceCRS, vertSrc, context));
         if (!res.empty()) {
-            createOperationsVertToGeogBallpark(sourceCRS, targetCRS, context,
-                                               vertSrc, geogDst, res);
+            createOperationsVertToGeogSynthetized(sourceCRS, targetCRS, context,
+                                                  vertSrc, geogDst, res);
         }
     }
 
@@ -4442,28 +4455,34 @@ void CoordinateOperationFactory::Private::createOperationsGeodToGeod(
 
     ENTER_FUNCTION();
 
-    if (geodSrc->ellipsoid()->celestialBody() !=
-        geodDst->ellipsoid()->celestialBody()) {
+    const auto &srcEllps = geodSrc->ellipsoid();
+    const auto &dstEllps = geodDst->ellipsoid();
+    if (srcEllps->celestialBody() == dstEllps->celestialBody() &&
+        srcEllps->celestialBody() != NON_EARTH_BODY) {
+        // Same celestial body, with a known name (that is not the generic
+        // NON_EARTH_BODY used when we can't guess it) ==> compatible
+    } else if ((srcEllps->celestialBody() != dstEllps->celestialBody() &&
+                srcEllps->celestialBody() != NON_EARTH_BODY &&
+                dstEllps->celestialBody() != NON_EARTH_BODY) ||
+               std::fabs(srcEllps->semiMajorAxis().getSIValue() -
+                         dstEllps->semiMajorAxis().getSIValue()) >
+                   REL_ERROR_FOR_SAME_CELESTIAL_BODY *
+                       dstEllps->semiMajorAxis().getSIValue()) {
         const char *envVarVal = getenv("PROJ_IGNORE_CELESTIAL_BODY");
-        if (envVarVal == nullptr) {
+        if (envVarVal == nullptr || ci_equal(envVarVal, "NO") ||
+            ci_equal(envVarVal, "FALSE") || ci_equal(envVarVal, "OFF")) {
             std::string osMsg(
                 "Source and target ellipsoid do not belong to the same "
                 "celestial body (");
-            osMsg += geodSrc->ellipsoid()->celestialBody();
+            osMsg += srcEllps->celestialBody();
             osMsg += " vs ";
-            osMsg += geodDst->ellipsoid()->celestialBody();
-            osMsg += "). You may override this check by setting the "
-                     "PROJ_IGNORE_CELESTIAL_BODY environment variable to YES.";
-            throw util::UnsupportedOperationException(osMsg.c_str());
-        } else if (ci_equal(envVarVal, "NO") || ci_equal(envVarVal, "FALSE") ||
-                   ci_equal(envVarVal, "OFF")) {
-            std::string osMsg(
-                "Source and target ellipsoid do not belong to the same "
-                "celestial body (");
-            osMsg += geodSrc->ellipsoid()->celestialBody();
-            osMsg += " vs ";
-            osMsg += geodDst->ellipsoid()->celestialBody();
+            osMsg += dstEllps->celestialBody();
             osMsg += ").";
+            if (envVarVal == nullptr) {
+                osMsg += " You may override this check by setting the "
+                         "PROJ_IGNORE_CELESTIAL_BODY environment variable "
+                         "to YES.";
+            }
             throw util::UnsupportedOperationException(osMsg.c_str());
         }
     }
@@ -4732,8 +4751,32 @@ void CoordinateOperationFactory::Private::createOperationsDerivedTo(
         res.emplace_back(opFirst);
         return;
     }
+
     auto opsSecond = createOperations(derivedSrc->baseCRS(), sourceEpoch,
                                       targetCRS, targetEpoch, context);
+
+    // Optimization to remove a no-op "Conversion from WGS 84 to WGS 84"
+    // when transforming from EPSG:4979 to a CompoundCRS whose vertical CRS
+    // is a DerivedVerticalCRS of a datum with ellipsoid height.
+    if (opsSecond.size() == 1 &&
+        !opsSecond.front()->hasBallparkTransformation() &&
+        dynamic_cast<const crs::VerticalCRS *>(derivedSrc->baseCRS().get()) &&
+        !dynamic_cast<const crs::DerivedCRS *>(derivedSrc->baseCRS().get()) &&
+        dynamic_cast<const crs::GeographicCRS *>(targetCRS.get()) &&
+        !dynamic_cast<const crs::DerivedCRS *>(targetCRS.get())) {
+        auto conv = dynamic_cast<const Conversion *>(opsSecond.front().get());
+        if (conv &&
+            conv->nameStr() ==
+                buildConvName(targetCRS->nameStr(), targetCRS->nameStr()) &&
+            conv->method()->getEPSGCode() ==
+                EPSG_CODE_METHOD_CHANGE_VERTICAL_UNIT &&
+            conv->parameterValueNumericAsSI(
+                EPSG_CODE_PARAMETER_UNIT_CONVERSION_SCALAR) == 1.0) {
+            res.emplace_back(opFirst);
+            return;
+        }
+    }
+
     for (const auto &opSecond : opsSecond) {
         try {
             res.emplace_back(ConcatenatedOperation::createComputeMetadata(
@@ -5271,15 +5314,15 @@ void CoordinateOperationFactory::Private::createOperationsVertToGeog(
         }
     }
 
-    createOperationsVertToGeogBallpark(sourceCRS, targetCRS, context, vertSrc,
-                                       geogDst, res);
+    createOperationsVertToGeogSynthetized(sourceCRS, targetCRS, context,
+                                          vertSrc, geogDst, res);
 }
 
 // ---------------------------------------------------------------------------
 
-void CoordinateOperationFactory::Private::createOperationsVertToGeogBallpark(
+void CoordinateOperationFactory::Private::createOperationsVertToGeogSynthetized(
     const crs::CRSNNPtr &sourceCRS, const crs::CRSNNPtr &targetCRS,
-    Private::Context &, const crs::VerticalCRS *vertSrc,
+    Private::Context &context, const crs::VerticalCRS *vertSrc,
     const crs::GeographicCRS *geogDst,
     std::vector<CoordinateOperationNNPtr> &res) {
 
@@ -5313,22 +5356,60 @@ void CoordinateOperationFactory::Private::createOperationsVertToGeogBallpark(
         sourceCRSExtent->_isEquivalentTo(
             targetCRSExtent.get(), util::IComparable::Criterion::EQUIVALENT);
 
+    const auto &authFactory = context.context->getAuthorityFactory();
+    const auto dbContext =
+        authFactory ? authFactory->databaseContext().as_nullable() : nullptr;
+
+    const auto vertDatum = vertSrc->datumNonNull(dbContext);
+    const auto &vertDatumName = vertDatum->nameStr();
+    const auto geogDstDatum = geogDst->datumNonNull(dbContext);
+    const auto &geogDstDatumName = geogDstDatum->nameStr();
+    // We accept a vertical CRS whose datum name is the same datum name as the
+    // source geographic CRS, or whose datum name is "Ellipsoid" if it is part
+    // of a CompoundCRS whose horizontal CRS has a geodetic datum of the same
+    // datum name as the source geographic CRS, to mean an ellipsoidal height.
+    // This is against OGC Topic 2, and an extension needed for use case of
+    // https://github.com/OSGeo/PROJ/issues/4175
+    const bool bIsSameDatum = vertDatumName != "unknown" &&
+                              (vertDatumName == geogDstDatumName ||
+                               (vertDatumName == "Ellipsoid" &&
+                                !context.geogCRSOfVertCRSStack.empty() &&
+                                context.geogCRSOfVertCRSStack.back()
+                                        ->datumNonNull(dbContext)
+                                        ->nameStr() == geogDstDatumName));
+
+    std::string transfName;
+
+    if (bIsSameDatum) {
+        transfName = buildConvName(factor != 1.0 ? sourceCRS->nameStr()
+                                                 : targetCRS->nameStr(),
+                                   targetCRS->nameStr());
+    } else {
+        transfName =
+            buildTransfName(sourceCRS->nameStr(), targetCRS->nameStr());
+        transfName += " (";
+        transfName += BALLPARK_VERTICAL_TRANSFORMATION_NO_ELLIPSOID_VERT_HEIGHT;
+        transfName += ')';
+    }
+
     util::PropertyMap map;
-    std::string transfName(
-        buildTransfName(sourceCRS->nameStr(), targetCRS->nameStr()));
-    transfName += " (";
-    transfName += BALLPARK_VERTICAL_TRANSFORMATION_NO_ELLIPSOID_VERT_HEIGHT;
-    transfName += ')';
     map.set(common::IdentifiedObject::NAME_KEY, transfName)
         .set(common::ObjectUsage::DOMAIN_OF_VALIDITY_KEY,
              sameExtent ? NN_NO_CHECK(sourceCRSExtent)
                         : metadata::Extent::WORLD);
 
-    auto conv = Transformation::createChangeVerticalUnit(
-        map, sourceCRS, targetCRS,
-        common::Scale(heightDepthReversal ? -factor : factor), {});
-    conv->setHasBallparkTransformation(true);
-    res.push_back(conv);
+    if (bIsSameDatum) {
+        auto conv = Conversion::createChangeVerticalUnit(
+            map, common::Scale(heightDepthReversal ? -factor : factor));
+        conv->setCRSs(sourceCRS, targetCRS, nullptr);
+        res.push_back(conv);
+    } else {
+        auto transf = Transformation::createChangeVerticalUnit(
+            map, sourceCRS, targetCRS,
+            common::Scale(heightDepthReversal ? -factor : factor), {});
+        transf->setHasBallparkTransformation(true);
+        res.push_back(transf);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -5852,6 +5933,25 @@ void CoordinateOperationFactory::Private::createOperationsCompoundToGeog(
                 }
             };
             SetSkipHorizontalTransform setSkipHorizontalTransform(context);
+
+            struct SetGeogCRSOfVertCRS {
+                Context &context;
+                const bool hasPushed;
+
+                explicit SetGeogCRSOfVertCRS(
+                    Context &contextIn, const crs::GeographicCRSPtr &geogCRS)
+                    : context(contextIn), hasPushed(geogCRS != nullptr) {
+                    if (geogCRS)
+                        context.geogCRSOfVertCRSStack.push_back(
+                            NN_NO_CHECK(geogCRS));
+                }
+
+                ~SetGeogCRSOfVertCRS() {
+                    if (hasPushed)
+                        context.geogCRSOfVertCRSStack.pop_back();
+                }
+            };
+            SetGeogCRSOfVertCRS setGeogCRSOfVertCRS(context, srcGeogCRS);
 
             verticalTransforms = createOperations(
                 componentsSrc[1], util::optional<common::DataEpoch>(),

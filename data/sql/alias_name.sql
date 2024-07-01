@@ -743,6 +743,8 @@ INSERT INTO "alias_name" VALUES('vertical_datum','EPSG','1376','DKMSL','EPSG');
 INSERT INTO "alias_name" VALUES('geodetic_datum','EPSG','1382','ETRF2020','EPSG');
 INSERT INTO "alias_name" VALUES('geodetic_datum','EPSG','1383','WGS 84 (G2296)','EPSG');
 INSERT INTO "alias_name" VALUES('vertical_datum','EPSG','1374','DKMSL(2023)','EPSG');
+INSERT INTO "alias_name" VALUES('geodetic_datum','EPSG','1386','WC05-IRF','EPSG');
+INSERT INTO "alias_name" VALUES('geodetic_datum','EPSG','1385','ECML14-IRF','EPSG');
 INSERT INTO "alias_name" VALUES('projected_crs','EPSG','21100','Genuk / NEIEZ','EPSG');
 INSERT INTO "alias_name" VALUES('projected_crs','EPSG','2140','NAD83(CSRS98) / SCoPQ zone 3','EPSG');
 INSERT INTO "alias_name" VALUES('projected_crs','EPSG','2141','NAD83(CSRS98) / SCoPQ zone 4','EPSG');
@@ -2897,7 +2899,7 @@ INSERT INTO "alias_name" VALUES('projected_crs','EPSG','3835','S-42 zone 3','EPS
 INSERT INTO "alias_name" VALUES('projected_crs','EPSG','3836','Pulkovo 1942(83) / 6-degree Gauss-Kruger zone 4','EPSG');
 INSERT INTO "alias_name" VALUES('projected_crs','EPSG','3836','S-42 zone 4','EPSG');
 INSERT INTO "alias_name" VALUES('projected_crs','EPSG','3844','Stereo 70','EPSG');
-INSERT INTO "alias_name" VALUES('projected_crs','EPSG','3844','S-42 / Stereo 70','EPSG');
+INSERT INTO "alias_name" VALUES('projected_crs','EPSG','3844','S-42 / Stereographic 1970','EPSG');
 INSERT INTO "alias_name" VALUES('projected_crs','EPSG','3844','Dealul Piscului 1970/ Stereo 70','EPSG');
 INSERT INTO "alias_name" VALUES('geodetic_crs','EPSG','4316','Dealul Piscului 1933','EPSG');
 INSERT INTO "alias_name" VALUES('projected_crs','EPSG','31600','Dealul Piscului 1933/ Stereo 33','EPSG');
@@ -7975,3 +7977,7 @@ INSERT INTO "alias_name" VALUES('projected_crs','EPSG','10732','ETRS89/DREF91/R1
 INSERT INTO "alias_name" VALUES('vertical_crs','EPSG','10551','DKMSL ensemble depth','EPSG');
 INSERT INTO "alias_name" VALUES('vertical_crs','EPSG','10552','DKLAT ensemble depth','EPSG');
 INSERT INTO "alias_name" VALUES('compound_crs','EPSG','7400','NTF (Paris) + NGF IGN69 height','EPSG');
+INSERT INTO "alias_name" VALUES('projected_crs','EPSG','3844','Stereografic 1970','EPSG');
+INSERT INTO "alias_name" VALUES('compound_crs','EPSG','10627','ETRS89 / ECML14 SnakeGrid + Newlyn height','EPSG');
+INSERT INTO "alias_name" VALUES('projected_crs','EPSG','10626','ETRS89 / ECML14 SnakeGrid','EPSG');
+INSERT INTO "alias_name" VALUES('projected_crs','EPSG','10632','ETRS89 / WC05 SnakeGrid','EPSG');

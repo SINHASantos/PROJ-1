@@ -3851,6 +3851,98 @@ DatabaseContext::getTransformationsForGridName(
     return res;
 }
 
+// ---------------------------------------------------------------------------
+
+// Fixes wrong towgs84 values returned by epsg.io when using a Coordinate Frame
+// transformation, where they neglect to reverse the sign of the rotation terms.
+// Cf https://github.com/OSGeo/PROJ/issues/4170 and
+// https://github.com/maptiler/epsg.io/issues/194
+// We do that only when we found a valid Coordinate Frame rotation that
+// has the same numeric values (and no corresponding Position Vector
+// transformation with same values, or Coordinate Frame transformation with
+// opposite sign for rotation terms, both are highly unlikely)
+bool DatabaseContext::toWGS84AutocorrectWrongValues(
+    double &tx, double &ty, double &tz, double &rx, double &ry, double &rz,
+    double &scale_difference) const {
+    if (rx == 0 && ry == 0 && rz == 0)
+        return false;
+    // 9606: Coordinate Frame rotation (geog2D domain)
+    // 9607: Position Vector transformation (geog2D domain)
+    std::string sql(
+        "SELECT DISTINCT method_code "
+        "FROM helmert_transformation_table WHERE "
+        "abs(tx - ?) <= 1e-8 * abs(tx) AND "
+        "abs(ty - ?) <= 1e-8 * abs(ty) AND "
+        "abs(tz - ?) <= 1e-8 * abs(tz) AND "
+        "abs(rx - ?) <= 1e-8 * abs(rx) AND "
+        "abs(ry - ?) <= 1e-8 * abs(ry) AND "
+        "abs(rz - ?) <= 1e-8 * abs(rz) AND "
+        "abs(scale_difference - ?) <= 1e-8 * abs(scale_difference) AND "
+        "method_auth_name = 'EPSG' AND "
+        "method_code IN (9606, 9607) AND "
+        "translation_uom_auth_name = 'EPSG' AND "
+        "translation_uom_code = 9001 AND " // metre
+        "rotation_uom_auth_name = 'EPSG' AND "
+        "rotation_uom_code = 9104 AND " // arc-second
+        "scale_difference_uom_auth_name = 'EPSG' AND "
+        "scale_difference_uom_code = 9202 AND " // parts per million
+        "deprecated = 0");
+    ListOfParams params;
+    params.emplace_back(tx);
+    params.emplace_back(ty);
+    params.emplace_back(tz);
+    params.emplace_back(rx);
+    params.emplace_back(ry);
+    params.emplace_back(rz);
+    params.emplace_back(scale_difference);
+    bool bFound9606 = false;
+    bool bFound9607 = false;
+    for (const auto &row : d->run(sql, params)) {
+        if (row[0] == "9606") {
+            bFound9606 = true;
+        } else if (row[0] == "9607") {
+            bFound9607 = true;
+        }
+    }
+    if (bFound9607 && !bFound9606) {
+        params.clear();
+        params.emplace_back(tx);
+        params.emplace_back(ty);
+        params.emplace_back(tz);
+        params.emplace_back(-rx);
+        params.emplace_back(-ry);
+        params.emplace_back(-rz);
+        params.emplace_back(scale_difference);
+        if (d->run(sql, params).empty()) {
+            if (d->pjCtxt()) {
+                pj_log(d->pjCtxt(), PJ_LOG_ERROR,
+                       "Auto-correcting wrong sign of rotation terms of "
+                       "TOWGS84 clause from %s,%s,%s,%s,%s,%s,%s to "
+                       "%s,%s,%s,%s,%s,%s,%s",
+                       internal::toString(tx).c_str(),
+                       internal::toString(ty).c_str(),
+                       internal::toString(tz).c_str(),
+                       internal::toString(rx).c_str(),
+                       internal::toString(ry).c_str(),
+                       internal::toString(rz).c_str(),
+                       internal::toString(scale_difference).c_str(),
+                       internal::toString(tx).c_str(),
+                       internal::toString(ty).c_str(),
+                       internal::toString(tz).c_str(),
+                       internal::toString(-rx).c_str(),
+                       internal::toString(-ry).c_str(),
+                       internal::toString(-rz).c_str(),
+                       internal::toString(scale_difference).c_str());
+            }
+            rx = -rx;
+            ry = -ry;
+            rz = -rz;
+            return true;
+        }
+    }
+    return false;
+}
+
 //! @endcond
 
 // ---------------------------------------------------------------------------
@@ -4524,20 +4616,30 @@ std::string
 AuthorityFactory::identifyBodyFromSemiMajorAxis(double semi_major_axis,
                                                 double tolerance) const {
     auto res =
-        d->run("SELECT name, (ABS(semi_major_axis - ?) / semi_major_axis ) "
-               "AS rel_error FROM celestial_body WHERE rel_error <= ?",
+        d->run("SELECT DISTINCT name, "
+               "(ABS(semi_major_axis - ?) / semi_major_axis ) AS rel_error "
+               "FROM celestial_body WHERE rel_error <= ? "
+               "ORDER BY rel_error, name",
                {semi_major_axis, tolerance});
     if (res.empty()) {
         throw FactoryException("no match found");
     }
+    constexpr int IDX_NAME = 0;
     if (res.size() > 1) {
+        constexpr int IDX_REL_ERROR = 1;
+        // If the first object has a relative error of 0 and the next one
+        // a non-zero error, then use the first one.
+        if (res.front()[IDX_REL_ERROR] == "0" &&
+            (*std::next(res.begin()))[IDX_REL_ERROR] != "0") {
+            return res.front()[IDX_NAME];
+        }
         for (const auto &row : res) {
-            if (row[0] != res.front()[0]) {
+            if (row[IDX_NAME] != res.front()[IDX_NAME]) {
                 throw FactoryException("more than one match found");
             }
         }
     }
-    return res.front()[0];
+    return res.front()[IDX_NAME];
 }
 
 // ---------------------------------------------------------------------------

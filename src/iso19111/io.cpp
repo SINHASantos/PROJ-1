@@ -1274,18 +1274,11 @@ struct WKTParser::Private {
     DatabaseContextPtr dbContext_{};
     crs::GeographicCRSPtr geogCRSOfCompoundCRS_{};
 
-    static constexpr int MAX_PROPERTY_SIZE = 1024;
-    PropertyMap **properties_{};
-    int propertyCount_ = 0;
+    static constexpr unsigned int MAX_PROPERTY_SIZE = 1024;
+    std::vector<std::unique_ptr<PropertyMap>> properties_{};
 
-    Private() { properties_ = new PropertyMap *[MAX_PROPERTY_SIZE]; }
-
-    ~Private() {
-        for (int i = 0; i < propertyCount_; i++) {
-            delete properties_[i];
-        }
-        delete[] properties_;
-    }
+    Private() = default;
+    ~Private() = default;
     Private(const Private &) = delete;
     Private &operator=(const Private &) = delete;
 
@@ -1296,7 +1289,8 @@ struct WKTParser::Private {
 
     BaseObjectNNPtr build(const WKTNodeNNPtr &node);
 
-    IdentifierPtr buildId(const WKTNodeNNPtr &node, bool tolerant,
+    IdentifierPtr buildId(const WKTNodeNNPtr &parentNode,
+                          const WKTNodeNNPtr &node, bool tolerant,
                           bool removeInverseOf);
 
     PropertyMap &buildProperties(const WKTNodeNNPtr &node,
@@ -1612,7 +1606,8 @@ double WKTParser::Private::asDouble(const WKTNodeNNPtr &node) {
 
 // ---------------------------------------------------------------------------
 
-IdentifierPtr WKTParser::Private::buildId(const WKTNodeNNPtr &node,
+IdentifierPtr WKTParser::Private::buildId(const WKTNodeNNPtr &parentNode,
+                                          const WKTNodeNNPtr &node,
                                           bool tolerant, bool removeInverseOf) {
     const auto *nodeP = node->GP();
     const auto &nodeChildren = nodeP->children();
@@ -1645,6 +1640,26 @@ IdentifierPtr WKTParser::Private::buildId(const WKTNodeNNPtr &node,
         }
 
         auto code = stripQuotes(nodeChildren[1]);
+
+        // Prior to PROJ 9.5, when synthetizing an ID for a CONVERSION UTM Zone
+        // south, we generated a wrong value. Auto-fix that
+        const auto &parentNodeKeyword(parentNode->GP()->value());
+        if (parentNodeKeyword == WKTConstants::CONVERSION &&
+            codeSpace == Identifier::EPSG) {
+            const auto &parentNodeChildren = parentNode->GP()->children();
+            if (!parentNodeChildren.empty()) {
+                const auto parentNodeName(stripQuotes(parentNodeChildren[0]));
+                if (ci_starts_with(parentNodeName, "UTM Zone ") &&
+                    parentNodeName.find('S') != std::string::npos) {
+                    const int nZone =
+                        atoi(parentNodeName.c_str() + strlen("UTM Zone "));
+                    if (nZone >= 1 && nZone <= 60) {
+                        code = internal::toString(16100 + nZone);
+                    }
+                }
+            }
+        }
+
         auto &citationNode = nodeP->lookForChild(WKTConstants::CITATION);
         auto &uriNode = nodeP->lookForChild(WKTConstants::URI);
 
@@ -1686,12 +1701,11 @@ PropertyMap &WKTParser::Private::buildProperties(const WKTNodeNNPtr &node,
                                                  bool removeInverseOf,
                                                  bool hasName) {
 
-    if (propertyCount_ == MAX_PROPERTY_SIZE) {
+    if (properties_.size() >= MAX_PROPERTY_SIZE) {
         throw ParsingException("MAX_PROPERTY_SIZE reached");
     }
-    properties_[propertyCount_] = new PropertyMap();
-    auto &&properties = properties_[propertyCount_];
-    propertyCount_++;
+    properties_.push_back(internal::make_unique<PropertyMap>());
+    auto properties = properties_.back().get();
 
     std::string authNameFromAlias;
     std::string codeFromAlias;
@@ -1703,7 +1717,7 @@ PropertyMap &WKTParser::Private::buildProperties(const WKTNodeNNPtr &node,
         const auto &subNodeName(subNode->GP()->value());
         if (ci_equal(subNodeName, WKTConstants::ID) ||
             ci_equal(subNodeName, WKTConstants::AUTHORITY)) {
-            auto id = buildId(subNode, true, removeInverseOf);
+            auto id = buildId(node, subNode, true, removeInverseOf);
             if (id) {
                 identifiers->add(NN_NO_CHECK(id));
             }
@@ -2113,15 +2127,17 @@ EllipsoidNNPtr WKTParser::Private::buildEllipsoid(const WKTNodeNNPtr &node) {
         Scale invFlattening(invFlatteningChild->GP()->value() == "\"inf\""
                                 ? 0
                                 : asDouble(invFlatteningChild));
-        const auto celestialBody(
-            Ellipsoid::guessBodyName(dbContext_, semiMajorAxis.getSIValue()));
+        const auto ellpsProperties = buildProperties(node);
+        std::string ellpsName;
+        ellpsProperties.getStringValue(IdentifiedObject::NAME_KEY, ellpsName);
+        const auto celestialBody(Ellipsoid::guessBodyName(
+            dbContext_, semiMajorAxis.getSIValue(), ellpsName));
         if (invFlattening.getSIValue() == 0) {
-            return Ellipsoid::createSphere(buildProperties(node), semiMajorAxis,
+            return Ellipsoid::createSphere(ellpsProperties, semiMajorAxis,
                                            celestialBody);
         } else {
             return Ellipsoid::createFlattenedSphere(
-                buildProperties(node), semiMajorAxis, invFlattening,
-                celestialBody);
+                ellpsProperties, semiMajorAxis, invFlattening, celestialBody);
         }
     } catch (const std::exception &e) {
         throw buildRethrow(__FUNCTION__, e);
@@ -2334,7 +2350,7 @@ GeodeticReferenceFrameNNPtr WKTParser::Private::buildGeodeticReferenceFrame(
                 auto &idNode = nodeP->lookForChild(WKTConstants::AUTHORITY);
                 if (!isNull(idNode)) {
                     try {
-                        auto id = buildId(idNode, false, false);
+                        auto id = buildId(node, idNode, false, false);
                         auto authFactory2 = AuthorityFactory::create(
                             NN_NO_CHECK(dbContext_), *id->codeSpace());
                         auto dbDatum =
@@ -2463,6 +2479,15 @@ GeodeticReferenceFrameNNPtr WKTParser::Private::buildGeodeticReferenceFrame(
                 for (const auto &child : TOWGS84Children) {
                     toWGS84Parameters_.push_back(asDouble(child));
                 }
+
+                if (TOWGS84Size == 7 && dbContext_) {
+                    dbContext_->toWGS84AutocorrectWrongValues(
+                        toWGS84Parameters_[0], toWGS84Parameters_[1],
+                        toWGS84Parameters_[2], toWGS84Parameters_[3],
+                        toWGS84Parameters_[4], toWGS84Parameters_[5],
+                        toWGS84Parameters_[6]);
+                }
+
                 for (size_t i = TOWGS84Size; i < 7; ++i) {
                     toWGS84Parameters_.push_back(0.0);
                 }
@@ -3214,7 +3239,7 @@ WKTParser::Private::buildGeodeticCRS(const WKTNodeNNPtr &node) {
             const auto &subNodeName(subNode->GP()->value());
             if (ci_equal(subNodeName, WKTConstants::ID) ||
                 ci_equal(subNodeName, WKTConstants::AUTHORITY)) {
-                auto id = buildId(subNode, true, false);
+                auto id = buildId(node, subNode, true, false);
                 if (id) {
                     try {
                         auto authFactory = AuthorityFactory::create(
@@ -4490,10 +4515,80 @@ WKTParser::Private::buildProjectedCRS(const WKTNodeNNPtr &node) {
         !ci_equal(nodeValue, WKTConstants::BASEPROJCRS)) {
         ThrowMissing(WKTConstants::CS_);
     }
-    auto cs = buildCS(csNode, node, UnitOfMeasure::NONE);
-    auto cartesianCS = nn_dynamic_pointer_cast<CartesianCS>(cs);
 
     const std::string projCRSName = stripQuotes(nodeP->children()[0]);
+
+    auto cs = [this, &projCRSName, &nodeP, &csNode, &node, &nodeValue,
+               &conversionNode]() -> CoordinateSystemNNPtr {
+        if (isNull(csNode) && ci_equal(nodeValue, WKTConstants::BASEPROJCRS) &&
+            !isNull(conversionNode)) {
+            // A BASEPROJCRS (as of WKT2 18-010r11) normally lacks an explicit
+            // CS[] which cause issues to properly instanciate it. So we first
+            // start by trying to identify the BASEPROJCRS by its id or name.
+            // And fallback to exploring the conversion parameters to infer the
+            // CS AXIS unit from the linear parameter unit... Not fully bullet
+            // proof.
+            if (dbContext_) {
+                // Get official name from database if ID is present
+                auto &idNode = nodeP->lookForChild(WKTConstants::ID);
+                if (!isNull(idNode)) {
+                    try {
+                        auto id = buildId(node, idNode, false, false);
+                        auto authFactory = AuthorityFactory::create(
+                            NN_NO_CHECK(dbContext_), *id->codeSpace());
+                        auto projCRS =
+                            authFactory->createProjectedCRS(id->code());
+                        return projCRS->coordinateSystem();
+                    } catch (const std::exception &) {
+                    }
+                }
+
+                auto authFactory = AuthorityFactory::create(
+                    NN_NO_CHECK(dbContext_), std::string());
+                auto res = authFactory->createObjectsFromName(
+                    projCRSName, {AuthorityFactory::ObjectType::PROJECTED_CRS},
+                    false, 2);
+                if (res.size() == 1) {
+                    auto projCRS =
+                        dynamic_cast<const ProjectedCRS *>(res.front().get());
+                    if (projCRS) {
+                        return projCRS->coordinateSystem();
+                    }
+                }
+            }
+
+            auto conv = buildConversion(conversionNode, UnitOfMeasure::METRE,
+                                        UnitOfMeasure::DEGREE);
+            UnitOfMeasure linearUOM = UnitOfMeasure::NONE;
+            for (const auto &genOpParamvalue : conv->parameterValues()) {
+                auto opParamvalue =
+                    dynamic_cast<const operation::OperationParameterValue *>(
+                        genOpParamvalue.get());
+                if (opParamvalue) {
+                    const auto &parameterValue = opParamvalue->parameterValue();
+                    if (parameterValue->type() ==
+                        operation::ParameterValue::Type::MEASURE) {
+                        const auto &measure = parameterValue->value();
+                        const auto &unit = measure.unit();
+                        if (unit.type() == UnitOfMeasure::Type::LINEAR) {
+                            if (linearUOM == UnitOfMeasure::NONE) {
+                                linearUOM = unit;
+                            } else if (linearUOM != unit) {
+                                linearUOM = UnitOfMeasure::NONE;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            if (linearUOM != UnitOfMeasure::NONE) {
+                return CartesianCS::createEastingNorthing(linearUOM);
+            }
+        }
+        return buildCS(csNode, node, UnitOfMeasure::NONE);
+    }();
+    auto cartesianCS = nn_dynamic_pointer_cast<CartesianCS>(cs);
+
     if (esriStyle_ && dbContext_) {
         if (cartesianCS) {
             std::string outTableName;
@@ -5698,7 +5793,7 @@ BaseObjectNNPtr WKTParser::Private::build(const WKTNodeNNPtr &node) {
     if (ci_equal(name, WKTConstants::ID) ||
         ci_equal(name, WKTConstants::AUTHORITY)) {
         return util::nn_static_pointer_cast<BaseObject>(
-            NN_NO_CHECK(buildId(node, false, false)));
+            NN_NO_CHECK(buildId(node, node, false, false)));
     }
 
     if (ci_equal(name, WKTConstants::COORDINATEMETADATA)) {
@@ -5728,7 +5823,8 @@ class JSONParser {
     static Length getLength(const json &j, const char *key);
     static Measure getMeasure(const json &j);
 
-    IdentifierNNPtr buildId(const json &j, bool removeInverseOf);
+    IdentifierNNPtr buildId(const json &parentJ, const json &j,
+                            bool removeInverseOf);
     static ObjectDomainPtr buildObjectDomain(const json &j);
     PropertyMap buildProperties(const json &j, bool removeInverseOf = false,
                                 bool nameRequired = true);
@@ -6060,7 +6156,8 @@ ObjectDomainPtr JSONParser::buildObjectDomain(const json &j) {
 
 // ---------------------------------------------------------------------------
 
-IdentifierNNPtr JSONParser::buildId(const json &j, bool removeInverseOf) {
+IdentifierNNPtr JSONParser::buildId(const json &parentJ, const json &j,
+                                    bool removeInverseOf) {
 
     PropertyMap propertiesId;
     auto codeSpace(getString(j, "authority"));
@@ -6114,6 +6211,21 @@ IdentifierNNPtr JSONParser::buildId(const json &j, bool removeInverseOf) {
         throw ParsingException("Unexpected type for value of \"code\"");
     }
 
+    // Prior to PROJ 9.5, when synthetizing an ID for a CONVERSION UTM Zone
+    // south, we generated a wrong value. Auto-fix that
+    if (parentJ.contains("type") && getType(parentJ) == "Conversion" &&
+        codeSpace == Identifier::EPSG && parentJ.contains("name")) {
+        const auto parentNodeName(getName(parentJ));
+        if (ci_starts_with(parentNodeName, "UTM Zone ") &&
+            parentNodeName.find('S') != std::string::npos) {
+            const int nZone =
+                atoi(parentNodeName.c_str() + strlen("UTM Zone "));
+            if (nZone >= 1 && nZone <= 60) {
+                code = internal::toString(16100 + nZone);
+            }
+        }
+    }
+
     if (!version.empty()) {
         propertiesId.set(Identifier::VERSION_KEY, version);
     }
@@ -6152,13 +6264,13 @@ PropertyMap JSONParser::buildProperties(const json &j, bool removeInverseOf,
                 throw ParsingException(
                     "Unexpected type for value of \"ids\" child");
             }
-            identifiers->add(buildId(idJ, removeInverseOf));
+            identifiers->add(buildId(j, idJ, removeInverseOf));
         }
         map.set(IdentifiedObject::IDENTIFIERS_KEY, identifiers);
     } else if (j.contains("id")) {
         auto idJ = getObject(j, "id");
         auto identifiers = ArrayOfBaseObject::create();
-        identifiers->add(buildId(idJ, removeInverseOf));
+        identifiers->add(buildId(j, idJ, removeInverseOf));
         map.set(IdentifiedObject::IDENTIFIERS_KEY, identifiers);
     }
 
@@ -7084,15 +7196,18 @@ PrimeMeridianNNPtr JSONParser::buildPrimeMeridian(const json &j) {
 EllipsoidNNPtr JSONParser::buildEllipsoid(const json &j) {
     if (j.contains("semi_major_axis")) {
         auto semiMajorAxis = getLength(j, "semi_major_axis");
-        const auto celestialBody(
-            Ellipsoid::guessBodyName(dbContext_, semiMajorAxis.getSIValue()));
+        const auto ellpsProperties = buildProperties(j);
+        std::string ellpsName;
+        ellpsProperties.getStringValue(IdentifiedObject::NAME_KEY, ellpsName);
+        const auto celestialBody(Ellipsoid::guessBodyName(
+            dbContext_, semiMajorAxis.getSIValue(), ellpsName));
         if (j.contains("semi_minor_axis")) {
-            return Ellipsoid::createTwoAxis(buildProperties(j), semiMajorAxis,
+            return Ellipsoid::createTwoAxis(ellpsProperties, semiMajorAxis,
                                             getLength(j, "semi_minor_axis"),
                                             celestialBody);
         } else if (j.contains("inverse_flattening")) {
             return Ellipsoid::createFlattenedSphere(
-                buildProperties(j), semiMajorAxis,
+                ellpsProperties, semiMajorAxis,
                 Scale(getNumber(j, "inverse_flattening")), celestialBody);
         } else {
             throw ParsingException(
@@ -10683,7 +10798,7 @@ PrimeMeridianNNPtr PROJStringParser::Private::buildPrimeMeridian(Step &step) {
 std::string PROJStringParser::Private::guessBodyName(double a) {
 
     auto ret = Ellipsoid::guessBodyName(dbContext_, a);
-    if (ret == "Non-Earth body" && dbContext_ == nullptr && ctx_ != nullptr) {
+    if (ret == NON_EARTH_BODY && dbContext_ == nullptr && ctx_ != nullptr) {
         dbContext_ =
             ctx_->get_cpp_context()->getDatabaseContext().as_nullable();
         if (dbContext_) {
@@ -11360,6 +11475,26 @@ PROJStringParser::Private::buildBoundOrCompoundCRSIfNeeded(int iStep,
                 throw ParsingException("Non numerical value in towgs84 clause");
             }
         }
+
+        if (towgs84Values.size() == 7 && dbContext_) {
+            if (dbContext_->toWGS84AutocorrectWrongValues(
+                    towgs84Values[0], towgs84Values[1], towgs84Values[2],
+                    towgs84Values[3], towgs84Values[4], towgs84Values[5],
+                    towgs84Values[6])) {
+                for (auto &pair : step.paramValues) {
+                    if (ci_equal(pair.key, "towgs84")) {
+                        pair.value.clear();
+                        for (int i = 0; i < 7; ++i) {
+                            if (i > 0)
+                                pair.value += ',';
+                            pair.value += internal::toString(towgs84Values[i]);
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+
         crs = BoundCRS::createFromTOWGS84(crs, towgs84Values);
     }
 
