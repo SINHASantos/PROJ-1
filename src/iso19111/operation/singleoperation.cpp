@@ -1173,9 +1173,12 @@ SingleOperation::SingleOperation(const OperationMethodNNPtr &methodIn)
     const auto &methodName = d->method_->nameStr();
     setRequiresPerCoordinateInputTime(
         isTimeDependent(methodName) ||
-        methodEPSGCode == EPSG_CODE_METHOD_COORDINATE_FRAME_GEOCENTRIC ||
-        methodEPSGCode == EPSG_CODE_METHOD_COORDINATE_FRAME_GEOGRAPHIC_2D ||
-        methodEPSGCode == EPSG_CODE_METHOD_COORDINATE_FRAME_GEOGRAPHIC_3D ||
+        methodEPSGCode ==
+            EPSG_CODE_METHOD_TIME_DEPENDENT_COORDINATE_FRAME_GEOCENTRIC ||
+        methodEPSGCode ==
+            EPSG_CODE_METHOD_TIME_DEPENDENT_COORDINATE_FRAME_GEOGRAPHIC_2D ||
+        methodEPSGCode ==
+            EPSG_CODE_METHOD_TIME_DEPENDENT_COORDINATE_FRAME_GEOGRAPHIC_3D ||
         methodEPSGCode ==
             EPSG_CODE_METHOD_TIME_DEPENDENT_POSITION_VECTOR_GEOCENTRIC ||
         methodEPSGCode ==
@@ -4777,7 +4780,7 @@ PointMotionOperation::~PointMotionOperation() = default;
  * @param values Vector of GeneralOperationParameterNNPtr.
  * @param accuracies Vector of positional accuracy (might be empty).
  * @return new PointMotionOperation.
- * @throws InvalidOperation
+ * @throws InvalidOperation if the object cannot be constructed.
  */
 PointMotionOperationNNPtr PointMotionOperation::create(
     const util::PropertyMap &properties, const crs::CRSNNPtr &crsIn,
@@ -4830,7 +4833,7 @@ PointMotionOperationNNPtr PointMotionOperation::create(
  * values.size() == parameters.size()
  * @param accuracies Vector of positional accuracy (might be empty).
  * @return new PointMotionOperation.
- * @throws InvalidOperation
+ * @throws InvalidOperation if the object cannot be constructed.
  */
 PointMotionOperationNNPtr PointMotionOperation::create(
     const util::PropertyMap &propertiesOperation, const crs::CRSNNPtr &crsIn,
